@@ -1,0 +1,5 @@
+{
+  "name": "Spotify VibeCheck & Previewer",
+  "description": "Log in with Spotify to browse playlists, visualize audio features, and preview tracks using smart fallback technology. Powered by Gemini for playlist vibe analysis.",
+  "requestFramePermissions": []
+}
