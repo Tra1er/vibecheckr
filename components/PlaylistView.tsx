@@ -1,9 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Playlist, ExtendedTrack, GeminiAnalysisResult } from '../types';
 import { fetchPlaylistTracks, fetchAudioFeatures } from '../services/spotify';
-import { findSmartPreview } from '../services/preview';
 import { analyzePlaylistVibe } from '../services/gemini';
-import { Play, Pause, ChevronLeft, Zap, Activity, Music2, Loader2, Sparkles, UserPlus, SkipBack, SkipForward, Volume2, ArrowUpDown } from 'lucide-react';
+import { Play, Pause, ChevronLeft, Zap, Activity, Loader2, Sparkles, UserPlus, SkipBack, SkipForward, Volume2, AlertCircle } from 'lucide-react';
 import { BarChart, Bar, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
 interface PlaylistViewProps {
@@ -13,6 +12,7 @@ interface PlaylistViewProps {
 }
 
 type SortOption = 'default' | 'energy' | 'danceability' | 'tempo';
+type PlayerMode = 'native' | 'embed';
 
 const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) => {
   const [tracks, setTracks] = useState<ExtendedTrack[]>([]);
@@ -23,7 +23,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
   const [currentTrack, setCurrentTrack] = useState<ExtendedTrack | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.5);
-  const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
+  const [playerMode, setPlayerMode] = useState<PlayerMode>('native');
   
   // Sorting
   const [sortBy, setSortBy] = useState<SortOption>('default');
@@ -57,59 +57,62 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
     };
     loadData();
     
+    // Cleanup audio on unmount
     return () => {
       if (audioRef.current) {
         audioRef.current.pause();
+        audioRef.current.src = "";
       }
     };
   }, [playlist.id, token]);
 
   // Handle Playback Logic
-  const handlePlay = async (track: ExtendedTrack) => {
-    // 1. Toggle current track
+  const handlePlay = (track: ExtendedTrack) => {
+    // If clicking the same track, toggle play/pause (only works for native)
     if (currentTrack?.id === track.id) {
-      if (isPlaying) {
-        audioRef.current?.pause();
-        setIsPlaying(false);
-      } else {
-        audioRef.current?.play();
-        setIsPlaying(true);
+      if (playerMode === 'native') {
+        if (isPlaying) {
+          audioRef.current?.pause();
+          setIsPlaying(false);
+        } else {
+          audioRef.current?.play();
+          setIsPlaying(true);
+        }
       }
+      // For embed, we can't programmatically toggle easily due to iframe restrictions, 
+      // so we just let the user interact with the embed.
       return;
     }
 
-    // 2. Play new track
-    setLoadingPreviewId(track.id);
-    
-    // Stop previous audio
-    if (audioRef.current) {
-      audioRef.current.pause();
-    }
+    // New Track Selection
+    setCurrentTrack(track);
 
-    // Find preview
-    const url = await findSmartPreview(track);
-    setLoadingPreviewId(null);
-
-    if (url) {
+    if (track.preview_url) {
+      // --- NATIVE MODE ---
+      setPlayerMode('native');
+      
       if (!audioRef.current) {
         audioRef.current = new Audio();
+        audioRef.current.volume = volume;
+        audioRef.current.onended = () => setIsPlaying(false);
       }
-      audioRef.current.src = url;
-      audioRef.current.volume = volume;
       
+      audioRef.current.src = track.preview_url;
       const playPromise = audioRef.current.play();
       if (playPromise !== undefined) {
-          playPromise
-            .then(() => setIsPlaying(true))
-            .catch(error => console.error("Playback error:", error));
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch(e => console.error("Playback error", e));
       }
-
-      setCurrentTrack(track);
-      
-      // Auto reset on end
-      audioRef.current.onended = () => setIsPlaying(false);
     } else {
-      alert("No preview available for this track (neither on Spotify nor iTunes fallback).");
+      // --- EMBED MODE ---
+      // Fallback to Spotify Embed Iframe. This guarantees the correct song.
+      // We pause native audio if it was playing.
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      setIsPlaying(false); // Native player is not playing
+      setPlayerMode('embed');
     }
   };
 
@@ -165,7 +168,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
   }
 
   return (
-    <div className="min-h-screen bg-black pb-32">
+    <div className="min-h-screen bg-black pb-40">
       {/* Header */}
       <div className="bg-gradient-to-b from-neutral-800 to-black p-8 pt-10">
         <button 
@@ -307,7 +310,10 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
         <div className="mt-2 space-y-1">
           {sortedTracks.map((track, index) => {
              const isCurrent = currentTrack?.id === track.id;
-             const isLoading = loadingPreviewId === track.id;
+             // We only show "playing" animation if we are in native mode and playing.
+             // If in embed mode, we just highlight the row because the embed handles the play state.
+             const showPlaying = isCurrent && isPlaying && playerMode === 'native';
+             const showEmbedActive = isCurrent && playerMode === 'embed';
 
              return (
               <div 
@@ -316,19 +322,25 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
                 className={`group grid grid-cols-[auto_1fr_auto_auto] gap-4 items-center p-3 rounded-lg cursor-pointer transition-colors ${isCurrent ? 'bg-white/10' : 'hover:bg-white/5'}`}
               >
                 <div className="w-10 text-center text-neutral-400 group-hover:text-white relative flex justify-center items-center h-full">
-                    {isCurrent && isPlaying ? (
+                    {showPlaying ? (
                          <div className="flex gap-[2px] h-3 items-end">
                              <div className="w-[3px] bg-[#1DB954] animate-[pulse_0.6s_infinite] h-full"></div>
                              <div className="w-[3px] bg-[#1DB954] animate-[pulse_0.8s_infinite] h-[60%]"></div>
                              <div className="w-[3px] bg-[#1DB954] animate-[pulse_1s_infinite] h-full"></div>
                          </div>
+                    ) : showEmbedActive ? (
+                         <div className="w-2 h-2 rounded-full bg-[#1DB954] animate-pulse"></div>
                     ) : (
                         <span className="group-hover:hidden">{index + 1}</span>
                     )}
-                    <button className={`hidden group-hover:block ${isCurrent && isPlaying ? '!hidden' : ''} text-white`}>
-                        {isLoading ? <Loader2 size={16} className="animate-spin text-green-500"/> : isCurrent && !isPlaying ? <Play size={16} className="text-[#1DB954]"/> : <Play size={16} />}
+                    
+                    {/* Play Icon (Hover) */}
+                    <button className={`hidden group-hover:block ${(showPlaying || showEmbedActive) ? '!hidden' : ''} text-white`}>
+                       <Play size={16} />
                     </button>
-                     <button className={`hidden ${isCurrent && isPlaying ? '!block' : ''} text-green-500`}>
+                    
+                    {/* Pause Icon (Native Only) */}
+                     <button className={`hidden ${showPlaying ? '!block' : ''} text-green-500`}>
                         <Pause size={16} />
                     </button>
                 </div>
@@ -366,48 +378,72 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
 
       {/* Persistent Player Bar */}
       {currentTrack && (
-        <div className="fixed bottom-0 left-0 right-0 bg-[#181818] border-t border-[#282828] p-4 px-6 flex items-center justify-between z-50 shadow-2xl animate-in slide-in-from-bottom-full duration-500">
-            <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
-                <img 
-                    src={currentTrack.album.images[0]?.url} 
-                    alt={currentTrack.name} 
-                    className={`w-14 h-14 rounded shadow-lg ${isPlaying ? 'animate-[spin_10s_linear_infinite]' : ''}`} // Fun spin effect if you want, or remove
-                />
-                <div className="flex flex-col overflow-hidden">
-                    <span className="text-white font-medium truncate hover:underline cursor-pointer">{currentTrack.name}</span>
-                    <span className="text-xs text-neutral-400 truncate hover:underline cursor-pointer">{currentTrack.artists.map(a => a.name).join(', ')}</span>
+        <div className="fixed bottom-0 left-0 right-0 bg-[#181818] border-t border-[#282828] p-4 px-6 z-50 shadow-2xl animate-in slide-in-from-bottom-full duration-500">
+           {playerMode === 'native' ? (
+             /* NATIVE PLAYER UI */
+             <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
+                    <img 
+                        src={currentTrack.album.images[0]?.url} 
+                        alt={currentTrack.name} 
+                        className={`w-14 h-14 rounded shadow-lg ${isPlaying ? 'animate-[spin_10s_linear_infinite]' : ''}`} 
+                    />
+                    <div className="flex flex-col overflow-hidden">
+                        <span className="text-white font-medium truncate hover:underline cursor-pointer">{currentTrack.name}</span>
+                        <span className="text-xs text-neutral-400 truncate hover:underline cursor-pointer">{currentTrack.artists.map(a => a.name).join(', ')}</span>
+                    </div>
+                </div>
+
+                <div className="flex flex-col items-center w-1/3">
+                    <div className="flex items-center gap-6">
+                        <button className="text-neutral-400 hover:text-white transition-colors">
+                            <SkipBack size={20} />
+                        </button>
+                        <button 
+                            onClick={() => handlePlay(currentTrack)}
+                            className="w-10 h-10 bg-white rounded-full flex items-center justify-center hover:scale-105 transition-transform active:scale-95"
+                        >
+                            {isPlaying ? <Pause size={20} className="text-black fill-black" /> : <Play size={20} className="text-black fill-black pl-1" />}
+                        </button>
+                        <button className="text-neutral-400 hover:text-white transition-colors">
+                            <SkipForward size={20} />
+                        </button>
+                    </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 w-1/3 min-w-[200px]">
+                    <Volume2 size={18} className="text-neutral-400" />
+                    <input 
+                        type="range" 
+                        min="0" 
+                        max="1" 
+                        step="0.01" 
+                        value={volume}
+                        onChange={handleVolumeChange}
+                        className="w-24 h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:bg-[#1DB954]"
+                    />
                 </div>
             </div>
-
-            <div className="flex flex-col items-center w-1/3">
-                <div className="flex items-center gap-6">
-                    <button className="text-neutral-400 hover:text-white transition-colors" title="Previous (Not implemented in demo)">
-                        <SkipBack size={20} />
-                    </button>
-                    <button 
-                        onClick={() => handlePlay(currentTrack)}
-                        className="w-10 h-10 bg-white rounded-full flex items-center justify-center hover:scale-105 transition-transform active:scale-95"
-                    >
-                        {isPlaying ? <Pause size={20} className="text-black fill-black" /> : <Play size={20} className="text-black fill-black pl-1" />}
-                    </button>
-                    <button className="text-neutral-400 hover:text-white transition-colors" title="Next (Not implemented in demo)">
-                        <SkipForward size={20} />
-                    </button>
-                </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 w-1/3 min-w-[200px]">
-                <Volume2 size={18} className="text-neutral-400" />
-                <input 
-                    type="range" 
-                    min="0" 
-                    max="1" 
-                    step="0.01" 
-                    value={volume}
-                    onChange={handleVolumeChange}
-                    className="w-24 h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:bg-[#1DB954]"
-                />
-            </div>
+           ) : (
+             /* EMBED PLAYER UI */
+             <div className="flex items-center justify-center w-full">
+                 <div className="w-full max-w-3xl">
+                     <div className="text-xs text-neutral-400 mb-2 text-center flex items-center justify-center gap-2">
+                         <AlertCircle size={12} />
+                         <span>Preview unavailable via direct stream. Loaded official player to ensure correct track.</span>
+                     </div>
+                     <iframe 
+                        src={`https://open.spotify.com/embed/track/${currentTrack.id}?utm_source=generator&theme=0`} 
+                        width="100%" 
+                        height="80" 
+                        frameBorder="0" 
+                        allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" 
+                        loading="eager"
+                        className="rounded-xl shadow-lg"
+                     ></iframe>
+                 </div>
+             </div>
+           )}
         </div>
       )}
     </div>
