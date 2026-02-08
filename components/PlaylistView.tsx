@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Playlist, PlaylistTrackItem, ExtendedTrack, AudioFeatures, GeminiAnalysisResult } from '../types';
+import { Playlist, ExtendedTrack, GeminiAnalysisResult } from '../types';
 import { fetchPlaylistTracks, fetchAudioFeatures } from '../services/spotify';
 import { findSmartPreview } from '../services/preview';
 import { analyzePlaylistVibe } from '../services/gemini';
-import { Play, Pause, ChevronLeft, Zap, Activity, Music2, Info, Loader2, Sparkles, UserPlus } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import { Play, Pause, ChevronLeft, Zap, Activity, Music2, Loader2, Sparkles, UserPlus, SkipBack, SkipForward, Volume2, ArrowUpDown } from 'lucide-react';
+import { BarChart, Bar, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
 interface PlaylistViewProps {
   playlist: Playlist;
@@ -12,13 +12,22 @@ interface PlaylistViewProps {
   onBack: () => void;
 }
 
+type SortOption = 'default' | 'energy' | 'danceability' | 'tempo';
+
 const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) => {
   const [tracks, setTracks] = useState<ExtendedTrack[]>([]);
   const [loading, setLoading] = useState(true);
-  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
-  const [audioRef, setAudioRef] = useState<HTMLAudioElement | null>(null);
+  
+  // Audio State
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [currentTrack, setCurrentTrack] = useState<ExtendedTrack | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(0.5);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
   
+  // Sorting
+  const [sortBy, setSortBy] = useState<SortOption>('default');
+
   // Gemini Analysis State
   const [geminiResult, setGeminiResult] = useState<GeminiAnalysisResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -48,42 +57,67 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
     };
     loadData();
     
-    // Cleanup audio on unmount
     return () => {
-      if (audioRef) {
-        audioRef.pause();
+      if (audioRef.current) {
+        audioRef.current.pause();
       }
     };
-  }, [playlist.id, token]); // Removed audioRef from dependencies to avoid loop
+  }, [playlist.id, token]);
 
+  // Handle Playback Logic
   const handlePlay = async (track: ExtendedTrack) => {
-    // Stop current
-    if (audioRef) {
-      audioRef.pause();
-      setAudioRef(null);
-    }
-
-    if (playingTrackId === track.id) {
-      setPlayingTrackId(null);
+    // 1. Toggle current track
+    if (currentTrack?.id === track.id) {
+      if (isPlaying) {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current?.play();
+        setIsPlaying(true);
+      }
       return;
     }
 
+    // 2. Play new track
     setLoadingPreviewId(track.id);
     
-    // Find URL (Smart Preview)
+    // Stop previous audio
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+
+    // Find preview
     const url = await findSmartPreview(track);
-    
     setLoadingPreviewId(null);
 
     if (url) {
-      const audio = new Audio(url);
-      audio.volume = 0.5;
-      audio.play();
-      audio.onended = () => setPlayingTrackId(null);
-      setAudioRef(audio);
-      setPlayingTrackId(track.id);
+      if (!audioRef.current) {
+        audioRef.current = new Audio();
+      }
+      audioRef.current.src = url;
+      audioRef.current.volume = volume;
+      
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+          playPromise
+            .then(() => setIsPlaying(true))
+            .catch(error => console.error("Playback error:", error));
+      }
+
+      setCurrentTrack(track);
+      
+      // Auto reset on end
+      audioRef.current.onended = () => setIsPlaying(false);
     } else {
-      alert("No preview available for this track.");
+      alert("No preview available for this track (neither on Spotify nor iTunes fallback).");
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVol = parseFloat(e.target.value);
+    setVolume(newVol);
+    if (audioRef.current) {
+      audioRef.current.volume = newVol;
     }
   };
 
@@ -101,13 +135,26 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
     }
   };
 
+  // Sorting Logic
+  const getSortedTracks = () => {
+    const list = [...tracks];
+    switch(sortBy) {
+        case 'energy': return list.sort((a,b) => (b.features?.energy || 0) - (a.features?.energy || 0));
+        case 'danceability': return list.sort((a,b) => (b.features?.danceability || 0) - (a.features?.danceability || 0));
+        case 'tempo': return list.sort((a,b) => (b.features?.tempo || 0) - (a.features?.tempo || 0));
+        default: return list;
+    }
+  };
+
+  const sortedTracks = getSortedTracks();
+
   const chartData = tracks
     .filter(t => t.features)
     .map((t, i) => ({
       name: i,
       energy: t.features?.energy || 0,
       valence: t.features?.valence || 0,
-    })).slice(0, 50); // Limit chart data for performance
+    })).slice(0, 50);
 
   if (loading) {
     return (
@@ -118,7 +165,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
   }
 
   return (
-    <div className="min-h-screen bg-black pb-24">
+    <div className="min-h-screen bg-black pb-32">
       {/* Header */}
       <div className="bg-gradient-to-b from-neutral-800 to-black p-8 pt-10">
         <button 
@@ -132,14 +179,14 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
           <img 
             src={playlist.images[0]?.url || 'https://picsum.photos/300/300'} 
             alt={playlist.name}
-            className="w-52 h-52 shadow-2xl shadow-black/50 object-cover" 
+            className="w-52 h-52 shadow-2xl shadow-black/50 object-cover rounded-md" 
           />
           <div className="flex-1 space-y-4">
             <span className="text-xs font-bold uppercase tracking-wider text-neutral-400">Playlist</span>
             <h1 className="text-4xl md:text-6xl font-black text-white tracking-tight">{playlist.name}</h1>
             <p className="text-neutral-400 max-w-2xl">{playlist.description || `By ${playlist.owner.display_name} • ${tracks.length} songs`}</p>
             
-            <div className="flex gap-4 pt-2">
+            <div className="flex flex-wrap gap-4 pt-2">
               <button 
                 onClick={handleAnalyze}
                 disabled={analyzing || !!geminiResult}
@@ -155,14 +202,14 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
 
       {/* Gemini Result Section */}
       {geminiResult && (
-        <div className="mx-8 mt-6 bg-gradient-to-r from-purple-900/20 to-blue-900/20 border border-white/10 rounded-xl p-6 relative overflow-hidden">
+        <div className="mx-8 mt-6 bg-gradient-to-r from-purple-900/20 to-blue-900/20 border border-white/10 rounded-xl p-6 relative overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700">
             <div className="relative z-10 grid md:grid-cols-3 gap-8">
                 <div className="md:col-span-2">
                     <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
                         <Sparkles className="text-purple-400" size={20} /> AI Vibe Check
                     </h3>
                     <p className="text-neutral-300 leading-relaxed mb-4">{geminiResult.vibe}</p>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
                         {geminiResult.tags.map(tag => (
                             <span key={tag} className="px-3 py-1 bg-white/10 rounded-full text-xs font-medium text-purple-200 border border-white/5">
                                 #{tag}
@@ -232,45 +279,64 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
         </div>
       </div>
 
+      {/* Sort Controls */}
+      <div className="px-8 mt-8 flex justify-end">
+          <div className="flex items-center gap-2 bg-neutral-900 p-1 rounded-lg border border-white/10">
+              <span className="px-3 text-xs font-semibold text-neutral-500 uppercase">Sort by</span>
+              {(['default', 'energy', 'danceability', 'tempo'] as SortOption[]).map((option) => (
+                  <button
+                    key={option}
+                    onClick={() => setSortBy(option)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase transition-all ${sortBy === option ? 'bg-white/10 text-white' : 'text-neutral-400 hover:text-white'}`}
+                  >
+                      {option}
+                  </button>
+              ))}
+          </div>
+      </div>
+
       {/* Track List */}
-      <div className="px-8 mt-8">
+      <div className="px-8 mt-4">
         <div className="sticky top-0 bg-black z-20 py-4 border-b border-white/10 grid grid-cols-[auto_1fr_auto_auto] gap-4 text-xs font-semibold text-neutral-400 uppercase tracking-wider">
            <div className="w-10 text-center">#</div>
            <div>Title</div>
            <div className="hidden md:block">BPM</div>
-           <div className="w-12 text-center">Preview</div>
+           <div className="w-12 text-center">Energy</div>
         </div>
 
         <div className="mt-2 space-y-1">
-          {tracks.map((track, index) => {
-             const isPlaying = playingTrackId === track.id;
+          {sortedTracks.map((track, index) => {
+             const isCurrent = currentTrack?.id === track.id;
              const isLoading = loadingPreviewId === track.id;
 
              return (
               <div 
-                key={track.id + index} 
-                className={`group grid grid-cols-[auto_1fr_auto_auto] gap-4 items-center p-3 rounded-lg hover:bg-white/5 transition-colors ${isPlaying ? 'bg-white/10' : ''}`}
+                key={track.id + '-' + index} 
+                onClick={() => handlePlay(track)}
+                className={`group grid grid-cols-[auto_1fr_auto_auto] gap-4 items-center p-3 rounded-lg cursor-pointer transition-colors ${isCurrent ? 'bg-white/10' : 'hover:bg-white/5'}`}
               >
-                <div className="w-10 text-center text-neutral-400 group-hover:text-white relative flex justify-center">
-                    {isPlaying ? (
-                         <div className="w-4 h-4 relative">
-                            <span className="absolute inline-flex h-full w-full rounded-full bg-green-500 opacity-75 animate-ping"></span>
+                <div className="w-10 text-center text-neutral-400 group-hover:text-white relative flex justify-center items-center h-full">
+                    {isCurrent && isPlaying ? (
+                         <div className="flex gap-[2px] h-3 items-end">
+                             <div className="w-[3px] bg-[#1DB954] animate-[pulse_0.6s_infinite] h-full"></div>
+                             <div className="w-[3px] bg-[#1DB954] animate-[pulse_0.8s_infinite] h-[60%]"></div>
+                             <div className="w-[3px] bg-[#1DB954] animate-[pulse_1s_infinite] h-full"></div>
                          </div>
                     ) : (
                         <span className="group-hover:hidden">{index + 1}</span>
                     )}
-                    <button 
-                        onClick={() => handlePlay(track)}
-                        className={`hidden group-hover:flex ${isPlaying ? '!flex' : ''} text-white`}
-                    >
-                        {isLoading ? <Loader2 size={16} className="animate-spin text-green-500"/> : isPlaying ? <Pause size={16} className="text-green-500" /> : <Play size={16} />}
+                    <button className={`hidden group-hover:block ${isCurrent && isPlaying ? '!hidden' : ''} text-white`}>
+                        {isLoading ? <Loader2 size={16} className="animate-spin text-green-500"/> : isCurrent && !isPlaying ? <Play size={16} className="text-[#1DB954]"/> : <Play size={16} />}
+                    </button>
+                     <button className={`hidden ${isCurrent && isPlaying ? '!block' : ''} text-green-500`}>
+                        <Pause size={16} />
                     </button>
                 </div>
 
                 <div className="flex items-center gap-4 overflow-hidden">
-                    <img src={track.album.images[2]?.url || track.album.images[0]?.url} alt="" className="w-10 h-10 rounded shadow-md" />
+                    <img src={track.album.images[2]?.url || track.album.images[0]?.url} alt="" className="w-10 h-10 rounded shadow-md object-cover" />
                     <div className="flex flex-col overflow-hidden">
-                        <span className={`truncate font-medium ${isPlaying ? 'text-[#1DB954]' : 'text-white'}`}>{track.name}</span>
+                        <span className={`truncate font-medium ${isCurrent ? 'text-[#1DB954]' : 'text-white'}`}>{track.name}</span>
                         <span className="truncate text-sm text-neutral-400 group-hover:text-neutral-300">{track.artists.map(a => a.name).join(', ')}</span>
                     </div>
                 </div>
@@ -282,12 +348,12 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
                 <div className="w-12 flex justify-center">
                     {track.features && (
                         <div 
-                            className="w-2 h-8 bg-neutral-800 rounded-full overflow-hidden flex flex-col justify-end"
+                            className="w-10 h-1 bg-neutral-800 rounded-full overflow-hidden"
                             title={`Energy: ${Math.round(track.features.energy * 100)}%`}
                         >
                             <div 
-                                className="w-full bg-[#1DB954]" 
-                                style={{ height: `${track.features.energy * 100}%` }}
+                                className="h-full bg-[#1DB954]" 
+                                style={{ width: `${track.features.energy * 100}%` }}
                             />
                         </div>
                     )}
@@ -297,6 +363,53 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
           })}
         </div>
       </div>
+
+      {/* Persistent Player Bar */}
+      {currentTrack && (
+        <div className="fixed bottom-0 left-0 right-0 bg-[#181818] border-t border-[#282828] p-4 px-6 flex items-center justify-between z-50 shadow-2xl animate-in slide-in-from-bottom-full duration-500">
+            <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
+                <img 
+                    src={currentTrack.album.images[0]?.url} 
+                    alt={currentTrack.name} 
+                    className={`w-14 h-14 rounded shadow-lg ${isPlaying ? 'animate-[spin_10s_linear_infinite]' : ''}`} // Fun spin effect if you want, or remove
+                />
+                <div className="flex flex-col overflow-hidden">
+                    <span className="text-white font-medium truncate hover:underline cursor-pointer">{currentTrack.name}</span>
+                    <span className="text-xs text-neutral-400 truncate hover:underline cursor-pointer">{currentTrack.artists.map(a => a.name).join(', ')}</span>
+                </div>
+            </div>
+
+            <div className="flex flex-col items-center w-1/3">
+                <div className="flex items-center gap-6">
+                    <button className="text-neutral-400 hover:text-white transition-colors" title="Previous (Not implemented in demo)">
+                        <SkipBack size={20} />
+                    </button>
+                    <button 
+                        onClick={() => handlePlay(currentTrack)}
+                        className="w-10 h-10 bg-white rounded-full flex items-center justify-center hover:scale-105 transition-transform active:scale-95"
+                    >
+                        {isPlaying ? <Pause size={20} className="text-black fill-black" /> : <Play size={20} className="text-black fill-black pl-1" />}
+                    </button>
+                    <button className="text-neutral-400 hover:text-white transition-colors" title="Next (Not implemented in demo)">
+                        <SkipForward size={20} />
+                    </button>
+                </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 w-1/3 min-w-[200px]">
+                <Volume2 size={18} className="text-neutral-400" />
+                <input 
+                    type="range" 
+                    min="0" 
+                    max="1" 
+                    step="0.01" 
+                    value={volume}
+                    onChange={handleVolumeChange}
+                    className="w-24 h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:bg-[#1DB954]"
+                />
+            </div>
+        </div>
+      )}
     </div>
   );
 };
