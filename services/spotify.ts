@@ -1,18 +1,6 @@
 import { SPOTIFY_API_BASE } from "../constants";
 import { Playlist, PlaylistTrackItem, SpotifyUser, AudioFeatures } from "../types";
 
-export const getHashParams = (): Record<string, string> => {
-  const hash = window.location.hash.substring(1);
-  const params: Record<string, string> = {};
-  hash.split("&").forEach((part) => {
-    const [key, value] = part.split("=");
-    if (key && value) {
-      params[key] = decodeURIComponent(value);
-    }
-  });
-  return params;
-};
-
 export const fetchProfile = async (token: string): Promise<SpotifyUser> => {
   const res = await fetch(`${SPOTIFY_API_BASE}/me`, {
     headers: { Authorization: `Bearer ${token}` },

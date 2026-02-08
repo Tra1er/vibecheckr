@@ -1,5 +1,5 @@
 import React from "react";
-import { SCOPES, REDIRECT_URI, SPOTIFY_AUTH_ENDPOINT, SPOTIFY_CLIENT_ID } from "../constants";
+import { initiateLogin } from "../services/auth";
 import { Music } from "lucide-react";
 
 interface LoginProps {
@@ -7,12 +7,13 @@ interface LoginProps {
 }
 
 const Login: React.FC<LoginProps> = () => {
-  const handleLogin = () => {
-    const authUrl = `${SPOTIFY_AUTH_ENDPOINT}?client_id=${SPOTIFY_CLIENT_ID}&redirect_uri=${encodeURIComponent(
-      REDIRECT_URI
-    )}&scope=${encodeURIComponent(SCOPES.join(" "))}&response_type=token&show_dialog=true`;
-    
-    window.location.href = authUrl;
+  const handleLogin = async () => {
+    try {
+      await initiateLogin();
+    } catch (e) {
+      console.error("Login failed initialization", e);
+      alert("Failed to initialize login");
+    }
   };
 
   return (

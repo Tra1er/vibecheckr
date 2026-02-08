@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { getHashParams, fetchProfile, fetchPlaylists } from './services/spotify';
+import { fetchProfile, fetchPlaylists } from './services/spotify';
+import { getToken } from './services/auth';
 import Login from './components/Login';
 import PlaylistView from './components/PlaylistView';
 import { SpotifyUser, Playlist } from './types';
-import { LogOut, Music2, User } from 'lucide-react';
+import { LogOut, Music2, User, Loader2 } from 'lucide-react';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -11,14 +12,29 @@ export default function App() {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
-    // Check for token in hash
-    const params = getHashParams();
-    if (params.access_token) {
-      setToken(params.access_token);
-      window.location.hash = ""; // Clear hash for clean URL
-    }
+    const checkAuth = async () => {
+      // 1. Check if we have a code in URL (redirect back from Spotify)
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+
+      if (code) {
+        try {
+          // Clear URL to prevent code reuse
+          window.history.replaceState({}, document.title, "/");
+          const data = await getToken(code);
+          setToken(data.access_token);
+        } catch (e) {
+          console.error("Token exchange failed", e);
+        }
+      }
+      
+      setAuthLoading(false);
+    };
+
+    checkAuth();
   }, []);
 
   useEffect(() => {
@@ -47,10 +63,19 @@ export default function App() {
     setUser(null);
     setPlaylists([]);
     setSelectedPlaylist(null);
+    localStorage.removeItem('spotify_code_verifier');
   };
 
+  if (authLoading) {
+     return (
+        <div className="min-h-screen bg-black flex items-center justify-center">
+            <Loader2 className="animate-spin text-[#1DB954] w-10 h-10" />
+        </div>
+     )
+  }
+
   if (!token) {
-    return <Login onLogin={() => {}} />; // Login component handles the redirect
+    return <Login onLogin={() => {}} />;
   }
 
   if (selectedPlaylist) {
