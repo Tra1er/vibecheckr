@@ -56,3 +56,14 @@ export const fetchAudioFeatures = async (token: string, trackIds: string[]): Pro
     }
     return allFeatures;
 }
+
+export const playSdkTrack = async (token: string, deviceId: string, trackUri: string) => {
+    await fetch(`${SPOTIFY_API_BASE}/me/player/play?device_id=${deviceId}`, {
+        method: 'PUT',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ uris: [trackUri] })
+    });
+}

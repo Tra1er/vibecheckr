@@ -1,29 +1,42 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Playlist, ExtendedTrack, GeminiAnalysisResult } from '../types';
-import { fetchPlaylistTracks, fetchAudioFeatures } from '../services/spotify';
+import { Playlist, ExtendedTrack, GeminiAnalysisResult, SpotifyUser } from '../types';
+import { fetchPlaylistTracks, fetchAudioFeatures, playSdkTrack } from '../services/spotify';
 import { analyzePlaylistVibe } from '../services/gemini';
 import { Play, Pause, ChevronLeft, Zap, Activity, Loader2, Sparkles, UserPlus, SkipBack, SkipForward, Volume2, AlertCircle } from 'lucide-react';
 import { BarChart, Bar, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
+// Global type for Spotify SDK
+declare global {
+  interface Window {
+    onSpotifyWebPlaybackSDKReady: () => void;
+    Spotify: any;
+  }
+}
+
 interface PlaylistViewProps {
   playlist: Playlist;
   token: string;
+  user: SpotifyUser | null;
   onBack: () => void;
 }
 
 type SortOption = 'default' | 'energy' | 'danceability' | 'tempo';
-type PlayerMode = 'native' | 'embed';
+type PlayerMode = 'native' | 'sdk' | 'embed';
 
-const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) => {
+const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, user, onBack }) => {
   const [tracks, setTracks] = useState<ExtendedTrack[]>([]);
   const [loading, setLoading] = useState(true);
   
   // Audio State
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playerRef = useRef<any>(null); // Spotify SDK Player
+
   const [currentTrack, setCurrentTrack] = useState<ExtendedTrack | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.5);
   const [playerMode, setPlayerMode] = useState<PlayerMode>('native');
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [isSdkReady, setIsSdkReady] = useState(false);
   
   // Sorting
   const [sortBy, setSortBy] = useState<SortOption>('default');
@@ -31,6 +44,47 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
   // Gemini Analysis State
   const [geminiResult, setGeminiResult] = useState<GeminiAnalysisResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+
+  // Initialize Web Playback SDK
+  useEffect(() => {
+    if (!token || user?.product !== 'premium') return;
+
+    const script = document.createElement("script");
+    script.src = "https://sdk.scdn.co/spotify-player.js";
+    script.async = true;
+    document.body.appendChild(script);
+
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      const player = new window.Spotify.Player({
+        name: 'VibeCheck Web Player',
+        getOAuthToken: (cb: any) => { cb(token); },
+        volume: volume
+      });
+
+      player.addListener('ready', ({ device_id }: { device_id: string }) => {
+        console.log('Ready with Device ID', device_id);
+        setDeviceId(device_id);
+        setIsSdkReady(true);
+      });
+
+      player.addListener('not_ready', ({ device_id }: { device_id: string }) => {
+        console.log('Device ID has gone offline', device_id);
+        setIsSdkReady(false);
+      });
+
+      player.addListener('player_state_changed', (state: any) => {
+        if (!state) return;
+        setIsPlaying(!state.paused);
+      });
+      
+      player.connect();
+      playerRef.current = player;
+    };
+
+    return () => {
+      playerRef.current?.disconnect();
+    };
+  }, [token, user]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -57,7 +111,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
     };
     loadData();
     
-    // Cleanup audio on unmount
+    // Cleanup native audio on unmount
     return () => {
       if (audioRef.current) {
         audioRef.current.pause();
@@ -67,8 +121,8 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
   }, [playlist.id, token]);
 
   // Handle Playback Logic
-  const handlePlay = (track: ExtendedTrack) => {
-    // If clicking the same track, toggle play/pause (only works for native)
+  const handlePlay = async (track: ExtendedTrack) => {
+    // 1. Toggle current track
     if (currentTrack?.id === track.id) {
       if (playerMode === 'native') {
         if (isPlaying) {
@@ -78,50 +132,59 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
           audioRef.current?.play();
           setIsPlaying(true);
         }
+      } else if (playerMode === 'sdk') {
+         playerRef.current?.togglePlay();
       }
-      // For embed, we can't programmatically toggle easily due to iframe restrictions, 
-      // so we just let the user interact with the embed.
       return;
     }
 
-    // New Track Selection
+    // 2. Play new track
+    // Stop all previous audio
+    if (audioRef.current) audioRef.current.pause();
+    if (playerRef.current) playerRef.current.pause();
+    
     setCurrentTrack(track);
 
+    // Strategy: 
+    // 1. Native Preview (Fastest, works for everyone)
+    // 2. SDK (Invisible, Full Track, Premium Only)
+    // 3. Embed (Fallback, Visible, Free/Error)
+    
     if (track.preview_url) {
-      // --- NATIVE MODE ---
       setPlayerMode('native');
-      
       if (!audioRef.current) {
         audioRef.current = new Audio();
         audioRef.current.volume = volume;
         audioRef.current.onended = () => setIsPlaying(false);
       }
-      
       audioRef.current.src = track.preview_url;
-      const playPromise = audioRef.current.play();
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => setIsPlaying(true))
-          .catch(e => console.error("Playback error", e));
+      audioRef.current.play()
+        .then(() => setIsPlaying(true))
+        .catch(e => console.error("Playback error", e));
+
+    } else if (isSdkReady && deviceId && user?.product === 'premium') {
+      setPlayerMode('sdk');
+      const trackUri = `spotify:track:${track.id}`;
+      try {
+        await playSdkTrack(token, deviceId, trackUri);
+        // State updates handled by player_state_changed listener
+      } catch (e) {
+        console.error("SDK Playback failed, falling back to embed", e);
+        setPlayerMode('embed');
+        setIsPlaying(false);
       }
+
     } else {
-      // --- EMBED MODE ---
-      // Fallback to Spotify Embed Iframe. This guarantees the correct song.
-      // We pause native audio if it was playing.
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
-      setIsPlaying(false); // Native player is not playing
       setPlayerMode('embed');
+      setIsPlaying(false); // Embed must be manually played usually
     }
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVol = parseFloat(e.target.value);
     setVolume(newVol);
-    if (audioRef.current) {
-      audioRef.current.volume = newVol;
-    }
+    if (audioRef.current) audioRef.current.volume = newVol;
+    if (playerRef.current) playerRef.current.setVolume(newVol);
   };
 
   const handleAnalyze = async () => {
@@ -310,9 +373,9 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
         <div className="mt-2 space-y-1">
           {sortedTracks.map((track, index) => {
              const isCurrent = currentTrack?.id === track.id;
-             // We only show "playing" animation if we are in native mode and playing.
-             // If in embed mode, we just highlight the row because the embed handles the play state.
-             const showPlaying = isCurrent && isPlaying && playerMode === 'native';
+             // Show playing state for Native or SDK (invisible players)
+             // For Embed, we only highlight if it's the active selection, as we can't reliably track play state
+             const showPlaying = isCurrent && isPlaying && (playerMode === 'native' || playerMode === 'sdk');
              const showEmbedActive = isCurrent && playerMode === 'embed';
 
              return (
@@ -339,7 +402,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
                        <Play size={16} />
                     </button>
                     
-                    {/* Pause Icon (Native Only) */}
+                    {/* Pause Icon (Native/SDK Only) */}
                      <button className={`hidden ${showPlaying ? '!block' : ''} text-green-500`}>
                         <Pause size={16} />
                     </button>
@@ -379,8 +442,8 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
       {/* Persistent Player Bar */}
       {currentTrack && (
         <div className="fixed bottom-0 left-0 right-0 bg-[#181818] border-t border-[#282828] p-4 px-6 z-50 shadow-2xl animate-in slide-in-from-bottom-full duration-500">
-           {playerMode === 'native' ? (
-             /* NATIVE PLAYER UI */
+           {playerMode !== 'embed' ? (
+             /* INVISIBLE PLAYER UI (Used for Native & SDK) */
              <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
                     <img 
@@ -391,6 +454,7 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
                     <div className="flex flex-col overflow-hidden">
                         <span className="text-white font-medium truncate hover:underline cursor-pointer">{currentTrack.name}</span>
                         <span className="text-xs text-neutral-400 truncate hover:underline cursor-pointer">{currentTrack.artists.map(a => a.name).join(', ')}</span>
+                        {playerMode === 'sdk' && <span className="text-[10px] text-[#1DB954] font-bold uppercase tracking-wider">Spotify Connect</span>}
                     </div>
                 </div>
 
@@ -425,15 +489,11 @@ const PlaylistView: React.FC<PlaylistViewProps> = ({ playlist, token, onBack }) 
                 </div>
             </div>
            ) : (
-             /* EMBED PLAYER UI */
+             /* EMBED PLAYER UI (Fallback) */
              <div className="flex items-center justify-center w-full">
                  <div className="w-full max-w-3xl">
-                     <div className="text-xs text-neutral-400 mb-2 text-center flex items-center justify-center gap-2">
-                         <AlertCircle size={12} />
-                         <span>Preview unavailable via direct stream. Loaded official player to ensure correct track.</span>
-                     </div>
                      <iframe 
-                        src={`https://open.spotify.com/embed/track/${currentTrack.id}?utm_source=generator&theme=0`} 
+                        src={`https://open.spotify.com/embed/track/${currentTrack.id}?utm_source=generator&theme=0&autoplay=1`} 
                         width="100%" 
                         height="80" 
                         frameBorder="0" 

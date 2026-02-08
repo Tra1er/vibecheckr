@@ -83,6 +83,7 @@ export default function App() {
       <PlaylistView 
         playlist={selectedPlaylist} 
         token={token} 
+        user={user}
         onBack={() => setSelectedPlaylist(null)} 
       />
     );

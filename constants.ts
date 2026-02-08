@@ -8,6 +8,10 @@ export const SCOPES = [
   "user-read-email",
   "playlist-read-private",
   "playlist-read-collaborative",
+  "streaming", 
+  "user-read-playback-state",
+  "user-modify-playback-state",
+  "user-read-currently-playing"
 ];
 
 export const REDIRECT_URI = window.location.origin + "/";
